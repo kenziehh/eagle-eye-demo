@@ -8,6 +8,8 @@ import axios from 'axios';
 import { toast } from 'sonner-native';
 import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as FileSystem from 'expo-file-system';
+
 
 const { width } = Dimensions.get('window');
 
@@ -27,14 +29,24 @@ export default function FaceDetectionScreen() {
     }, [permission]);
 
     useEffect(() => {
-        if (isLoading) {
-            Animated.timing(progressAnim, {
-                toValue: 1,
-                duration: 3000,
-                useNativeDriver: false,
-            }).start();
+        let loopAnimation: Animated.CompositeAnimation | null = null;
+        let progressAnimation: Animated.CompositeAnimation | null = null;
 
-            Animated.loop(
+        if (isLoading) {
+            progressAnimation = Animated.timing(progressAnim, {
+                toValue: 1,
+                duration: 7000,
+                useNativeDriver: false,
+            });
+
+            progressAnimation.start(({ finished }) => {
+                // Cegah progress bar penuh jika loading dihentikan lebih cepat
+                if (!finished) {
+                    progressAnim.setValue(0);
+                }
+            });
+
+            loopAnimation = Animated.loop(
                 Animated.sequence([
                     Animated.timing(pulseAnim, {
                         toValue: 1.1,
@@ -47,57 +59,84 @@ export default function FaceDetectionScreen() {
                         useNativeDriver: true,
                     }),
                 ])
-            ).start();
+            );
+            loopAnimation.start();
         } else {
+            // Stop all animations and reset values
+            progressAnim.stopAnimation();
+            pulseAnim.stopAnimation();
+
             progressAnim.setValue(0);
             pulseAnim.setValue(1);
         }
+
+        return () => {
+            progressAnimation?.stop();
+            loopAnimation?.stop();
+        };
     }, [isLoading]);
+
 
     const handleCapture = async () => {
         if (!cameraRef.current) return;
 
         setIsLoading(true);
-        const photo = await cameraRef.current.takePictureAsync() as CameraCapturedPicture;
-
-        const formData = new FormData();
-        formData.append('file', {
-            uri: photo.uri,
-            name: 'face.jpg',
-            type: 'image/jpeg',
-        } as any);
 
         try {
-            const response = await axios.post(
-                `${BASE_URL}/detections/detect-image`,
-                formData,
-                {
-                    headers: {
-                        'Content-Type': 'multipart/form-data',
-                        'x-api-key': API_KEY,
-                    },
-                }
-            );
+            const photo = await cameraRef.current.takePictureAsync() as CameraCapturedPicture;
 
-            const { prediction, confidence } = response.data.detections;
+            const uri = photo?.uri;
+            if (!uri) {
+                toast.error('Gagal mengambil foto');
+                setIsLoading(false);
+                return;
+            }
 
-            if (prediction === "real") {
-                toast.success(`Face detected original with confidence: ${confidence}`);
+            // Cek apakah file-nya ada
+            const fileInfo = await FileSystem.getInfoAsync(uri);
+            if (!fileInfo.exists || fileInfo.size === 0) {
+                toast.error('File foto tidak valid atau kosong');
+                setIsLoading(false);
+                return;
+            }
+
+            // Gunakan uploadAsync dari FileSystem (lebih stabil di Android)
+            const uploadUrl = `${BASE_URL}/detections/detect-image`;
+            const result = await FileSystem.uploadAsync(uploadUrl, uri, {
+                httpMethod: 'POST',
+                uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+                fieldName: 'file',
+                headers: {
+                    'x-api-key': API_KEY,
+                },
+            });
+
+            const data = JSON.parse(result.body);
+            const detection = data?.detections;
+
+            if (!detection) {
+                toast.error('Response tidak valid dari server');
+                console.log('RESPONSE:', data);
+                setIsLoading(false);
+                return;
+            }
+
+            const { prediction, confidence } = detection;
+
+            if (prediction === 'real') {
+                toast.success(`Wajah terdeteksi asli (${confidence})`);
                 setIsVerified(true);
             } else {
-                toast.error(`Face detected deepfake with confidence: ${confidence}`);
+                toast.error(`Wajah terdeteksi deepfake (${confidence})`);
             }
+
         } catch (error) {
-            if (axios.isAxiosError(error)) {
-                toast.error(error.response?.data?.message || 'Failed to detect face');
-            } else {
-                toast.error('Failed to detect face');
-            }
+            console.log('ERROR saat deteksi wajah:', error);
+            toast.error('Terjadi kesalahan saat mendeteksi wajah');
         }
 
         setIsLoading(false);
     };
-
     const renderCameraSection = () => {
         if (!permission?.granted) {
             return (
@@ -222,7 +261,7 @@ export default function FaceDetectionScreen() {
 
                     }}
                     onPress={
-                        () => router.push('/voice') 
+                        () => router.push('/voice')
                     }
 
                 >

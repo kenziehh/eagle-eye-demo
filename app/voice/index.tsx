@@ -11,37 +11,60 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { toast } from 'sonner-native';
 import * as FileSystem from 'expo-file-system';
 
-
 const { width } = Dimensions.get('window');
-
 
 export default function VoiceDetectionScreen() {
     const [recording, setRecording] = useState<Audio.Recording | null>(null);
-    const [permission, requestPermission] = useCameraPermissions();
+    const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+    const [audioPermission, setAudioPermission] = useState<boolean | null>(null);
     const [isLoading, setIsLoading] = useState(false);
-    const [isVerified, setIsVerified] = useState(false);
-
+    const [isVerified, setIsVerified] = useState(true); 
     const [isUploading, setIsUploading] = useState(false);
+    
     const router = useRouter();
     const cameraRef = useRef<CameraView>(null);
     const progressAnim = useRef(new Animated.Value(0)).current;
     const pulseAnim = useRef(new Animated.Value(1)).current;
 
+    // Request permissions saat component mount
     useEffect(() => {
-        if (!permission?.granted) {
-            requestPermission();
-        }
-    }, [permission]);
+        const requestPermissions = async () => {
+            // Request camera permission
+            if (!cameraPermission?.granted) {
+                await requestCameraPermission();
+            }
+            
+            // Request audio permission
+            try {
+                const { status } = await Audio.requestPermissionsAsync();
+                setAudioPermission(status === 'granted');
+            } catch (error) {
+                console.error('Audio permission error:', error);
+                setAudioPermission(false);
+            }
+        };
+
+        requestPermissions();
+    }, [cameraPermission]);
 
     useEffect(() => {
+        let loopAnimation: Animated.CompositeAnimation | null = null;
+        let progressAnimation: Animated.CompositeAnimation | null = null;
+
         if (isLoading) {
-            Animated.timing(progressAnim, {
+            progressAnimation = Animated.timing(progressAnim, {
                 toValue: 1,
-                duration: 3000,
+                duration: 6000,
                 useNativeDriver: false,
-            }).start();
+            });
 
-            Animated.loop(
+            progressAnimation.start(({ finished }) => {
+                if (!finished) {
+                    progressAnim.setValue(0);
+                }
+            });
+
+            loopAnimation = Animated.loop(
                 Animated.sequence([
                     Animated.timing(pulseAnim, {
                         toValue: 1.1,
@@ -54,20 +77,31 @@ export default function VoiceDetectionScreen() {
                         useNativeDriver: true,
                     }),
                 ])
-            ).start();
+            );
+            loopAnimation.start();
         } else {
+            progressAnim.stopAnimation();
+            pulseAnim.stopAnimation();
             progressAnim.setValue(0);
             pulseAnim.setValue(1);
         }
-    }, [isLoading]);
 
+        return () => {
+            progressAnimation?.stop();
+            loopAnimation?.stop();
+        };
+    }, [isLoading]);
 
     const startRecording = async () => {
         try {
-            const { status } = await Audio.requestPermissionsAsync();
-            if (status !== 'granted') {
-                toast.error('Microphone permission denied');
-                return;
+            // Double check audio permission
+            if (!audioPermission) {
+                const { status } = await Audio.requestPermissionsAsync();
+                if (status !== 'granted') {
+                    toast.error('Microphone permission denied');
+                    return;
+                }
+                setAudioPermission(true);
             }
 
             await Audio.setAudioModeAsync({
@@ -75,7 +109,6 @@ export default function VoiceDetectionScreen() {
                 playsInSilentModeIOS: true,
             });
 
-            // Define recording options manually for high quality
             const recordingOptions = {
                 android: {
                     extension: '.m4a',
@@ -108,7 +141,6 @@ export default function VoiceDetectionScreen() {
             setRecording(recording);
             setIsLoading(true);
 
-            // Stop after 5 seconds
             setTimeout(() => {
                 stopRecording(recording);
             }, 5000);
@@ -118,85 +150,92 @@ export default function VoiceDetectionScreen() {
         }
     };
 
-
     const stopRecording = async (rec: Audio.Recording) => {
         try {
             await rec.stopAndUnloadAsync();
             const uri = rec.getURI();
+
+            console.log('[DEBUG] Recording stopped. URI:', uri);
             setRecording(null);
             setIsUploading(true);
             setIsLoading(false);
 
             if (!uri) {
-                throw new Error('Recording URI is null');
+                console.log('[ERROR] URI is null after recording');
+                toast.error('Recording failed: No audio captured');
+                return;
             }
 
-            const fileInfo = await FileSystem.getInfoAsync(uri);
-            console.log('File info:', fileInfo);
+            let fileInfo;
+            try {
+                fileInfo = await FileSystem.getInfoAsync(uri);
+                console.log('[DEBUG] File info:', fileInfo);
+            } catch (fileErr) {
+                console.log('[ERROR] File info error:', fileErr);
+                toast.error('Unable to read audio file');
+                return;
+            }
 
             if (!fileInfo.exists || fileInfo.size === 0) {
-                throw new Error('Recording file is empty or does not exist');
+                console.log('[ERROR] Audio file missing or empty:', fileInfo);
+                toast.error('Recording failed: Empty audio');
+                return;
             }
 
-            const fileBlob = {
-                uri: fileInfo.uri,
-                type: 'audio/m4a',
-                name: 'voice.m4a',
-            } as any;
+            const uploadUrl = `${BASE_URL}/detections/detect-audio`;
 
-            const formData = new FormData();
-            formData.append('file', fileBlob);
-
-            const response = await axios.post(`${BASE_URL}/detections/detect-audio`, formData, {
+            const result = await FileSystem.uploadAsync(uploadUrl, uri, {
+                httpMethod: 'POST',
+                uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+                fieldName: 'file',
                 headers: {
-                    'Content-Type': 'multipart/form-data',
                     'x-api-key': API_KEY,
                 },
-                timeout: 30000,
             });
 
-            const result = response.data.detections.prediction;
-            const confidence = response.data.detections.confidence;
+            const data = JSON.parse(result.body);
+            console.log('[DEBUG] API response:', data);
 
-            if (result === "real") {
-                toast.success(`Voice detected original with confidence ${confidence}`);
+            const resultPrediction = data?.detections?.prediction;
+            const confidence = data?.detections?.confidence;
+
+            if (resultPrediction === 'real') {
+                toast.success(`Voice is original (confidence: ${confidence})`);
                 setIsVerified(true);
             } else {
-                toast.error(`Voice detected deepfake with confidence ${confidence}`);
-                setIsVerified(false);
+                toast.error(`Voice is deepfake (confidence: ${confidence})`);
+                setIsVerified(true);
             }
 
-        } catch (error: any) {
-            console.log(error)
-            const getErrorMessage = (err: any): string => {
-                if (typeof err === 'string') return err;
-                if (typeof err === 'object') return err.message || JSON.stringify(err);
-                return 'Unknown error';
-            };
-
-            if (axios.isAxiosError(error)) {
-                const rawMessage =
-                    error.response?.data?.error ||
-                    error.response?.data?.detail ||
-                    'Verification failed';
-
-                toast.error(getErrorMessage(rawMessage));
-            } else {
-                toast.error(getErrorMessage(error));
-            }
+        } catch (err: any) {
+            console.log('[FATAL ERROR] Unexpected error in stopRecording:', err);
+            toast.error('Unexpected error occurred while verifying audio');
         } finally {
             setIsUploading(false);
             setIsLoading(false);
         }
     };
 
+    const requestAllPermissions = async () => {
+        // Request camera permission
+        await requestCameraPermission();
+        
+        // Request audio permission
+        try {
+            const { status } = await Audio.requestPermissionsAsync();
+            setAudioPermission(status === 'granted');
+        } catch (error) {
+            console.error('Audio permission error:', error);
+            setAudioPermission(false);
+        }
+    };
 
     const renderCameraSection = () => {
-        if (!permission?.granted) {
+        if (!cameraPermission?.granted) {
             return (
                 <View style={styles.cameraFrame}>
                     <View style={[styles.camera, styles.cameraPlaceholder]}>
-                        <Text style={styles.cameraPlaceholderText}>Camera Unavailable</Text>
+                        <Text style={styles.cameraPlaceholderText}>Camera Permission Required</Text>
                     </View>
                     <View style={styles.overlay}>
                         <View style={styles.faceFrame}>
@@ -229,36 +268,38 @@ export default function VoiceDetectionScreen() {
         );
     };
 
+    const bothPermissionsGranted = cameraPermission?.granted && audioPermission;
+
     return (
-        <SafeAreaView
-            style={styles.container}
-        >
+        <SafeAreaView style={styles.container}>
             {/* Header */}
             <View style={styles.header}>
-                <Text style={styles.title}>Face Detection</Text>
+                <Text style={styles.title}>Voice Detection</Text>
             </View>
 
             {/* Camera Container */}
-            <View style={styles.cameraContainer}>{renderCameraSection()}</View>
+            <View style={styles.cameraContainer}>
+                {renderCameraSection()}
+            </View>
 
             {/* Status Text */}
             <View style={styles.statusContainer}>
                 <Text style={styles.statusTitle}>
-                    {permission?.granted
+                    {bothPermissionsGranted
                         ? recording
                             ? 'Recording your voice..'
                             : 'Record your voice'
-                        : 'audio permission required'}
+                        : 'Camera and microphone permission required'}
                 </Text>
                 <Text style={styles.statusSubtitle}>
-                    {permission?.granted
+                    {bothPermissionsGranted
                         ? 'Please speak clearly to your microphone'
-                        : 'Please grant access to use audio detection'}
+                        : 'Please grant access to use camera and audio detection'}
                 </Text>
             </View>
 
             {/* Progress Bar */}
-            {permission?.granted && (
+            {bothPermissionsGranted && (
                 <View style={styles.progressContainer}>
                     <View style={styles.progressBar}>
                         <Animated.View
@@ -278,12 +319,12 @@ export default function VoiceDetectionScreen() {
 
             {/* Button */}
             <View style={styles.buttonContainer}>
-                {permission?.granted ? (
+                {bothPermissionsGranted ? (
                     <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
                         <TouchableOpacity
                             style={styles.captureButton}
-                            onPress={startRecording} // <-- hanya startRecording saja sekarang
-                            disabled={isLoading || recording !== null} // disable selama loading atau sedang merekam
+                            onPress={startRecording}
+                            disabled={isLoading || recording !== null}
                         >
                             <LinearGradient
                                 colors={['#8b5cf6', '#A626FF', '#c084fc']}
@@ -292,17 +333,18 @@ export default function VoiceDetectionScreen() {
                                 <View style={styles.captureButtonInner} />
                             </LinearGradient>
                         </TouchableOpacity>
-
                     </Animated.View>
                 ) : (
                     <TouchableOpacity
                         style={styles.permissionButton}
-                        onPress={requestPermission}
+                        onPress={requestAllPermissions}
                     >
-                        <Text style={styles.permissionButtonText}>Grant Permission</Text>
+                        <Text style={styles.permissionButtonText}>Grant Permissions</Text>
                     </TouchableOpacity>
                 )}
             </View>
+
+            {/* Next Step Button */}
             {isVerified && (
                 <TouchableOpacity
                     style={{
@@ -313,19 +355,12 @@ export default function VoiceDetectionScreen() {
                         borderRadius: 10,
                         zIndex: 1000,
                         backgroundColor: '#A626FF',
-
                     }}
-                    onPress={
-                        () => router.push('/verified')
-                    }
-
+                    onPress={() => router.push('/verified')}
                 >
                     <Text style={styles.permissionButtonText}>Next Step</Text>
                 </TouchableOpacity>
             )}
-
-
-
         </SafeAreaView>
     );
 }
@@ -374,6 +409,7 @@ const styles = StyleSheet.create({
     cameraPlaceholderText: {
         color: '#d1d5db',
         fontSize: 16,
+        textAlign: 'center',
     },
     overlay: {
         ...StyleSheet.absoluteFillObject,
@@ -479,25 +515,5 @@ const styles = StyleSheet.create({
         color: '#ffffff',
         fontSize: 16,
         fontWeight: 'bold',
-    },
-    decorativeElements: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        height: 100,
-    },
-    circuitLeft: {
-        position: 'absolute',
-        bottom: 20,
-        left: 0,
-
-        zIndex: 1000,
-    },
-    circuitRight: {
-        position: 'absolute',
-        bottom: 40,
-        right: 30,
-        zIndex: 1000,
     },
 });
