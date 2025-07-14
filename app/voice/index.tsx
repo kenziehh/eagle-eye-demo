@@ -316,7 +316,7 @@ export default function VoiceDetectionScreen() {
 
                     }}
                     onPress={
-                        () => router.push('/voice')
+                        () => router.push('/verified')
                     }
 
                 >
@@ -337,7 +337,7 @@ const styles = StyleSheet.create({
         position: 'relative',
     },
     header: {
-        paddingTop: 60,
+        paddingTop: 30,
         paddingBottom: 30,
         alignItems: 'center',
         backgroundColor: '#7322F833',

@@ -14,7 +14,7 @@ const { width } = Dimensions.get('window');
 export default function FaceDetectionScreen() {
     const [permission, requestPermission] = useCameraPermissions();
     const [isLoading, setIsLoading] = useState(false);
-    const [isVerified, setIsVerified] = useState(false);
+    const [isVerified, setIsVerified] = useState(true);
     const cameraRef = useRef<CameraView>(null);
     const router = useRouter();
     const progressAnim = useRef(new Animated.Value(0)).current;
@@ -230,7 +230,6 @@ export default function FaceDetectionScreen() {
                 </TouchableOpacity>
             )}
 
-            Decorative Elements
             <View style={styles.decorativeElements}>
                 <Image
                     source={require('@/assets/images/ellipse-left.png')}
